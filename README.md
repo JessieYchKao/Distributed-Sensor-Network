@@ -1,4 +1,4 @@
-# IoT Light Sensor Communication
+# Distributed Sensor Network with Adaptive Control
 
 ## Overview
 
