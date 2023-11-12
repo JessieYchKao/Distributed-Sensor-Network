@@ -1,4 +1,4 @@
-# Distributed Sensor Network with Adaptive Control
+# Distributed Sensor Network
 
 ## Overview
 
