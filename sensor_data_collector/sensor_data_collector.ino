@@ -8,9 +8,11 @@
 #include <WiFiUdp.h>
 #include <Wire.h>
 #include "WiFiCredentials.h"
+#include <FastLED.h>
 
 #undef DEBUG
 #define VERSIONNUMBER 28
+
 #define SWARMSIZE 3
 #define SWARMTOOOLD 30000 // 30 seconds is too old - it must be dead
 #define NETWORKSILENT 200 // 200 ms is too silent, broadcast
@@ -29,10 +31,16 @@ int mySwarmID = 0;
 #define BLINK_BRIGHT_LED 7
 
 #define PHOTORES_PIN A0
-#define ONBOARD_LED1 BUILTIN_LED
-#define MASTER_LED 16
+#define MASTER_LED BUILTIN_LED
 
-unsigned int localPort = 2901;      // local port to listen for UDP packets
+#define LED_PIN     D7  // Connect the data input pin to GPIO D7
+// Number of LEDs on Freenove rgb LED module
+#define NUM_LEDS    8
+CRGB leds[NUM_LEDS];
+
+unsigned int localPort = 5005;      // local port to listen for UDP packets
+// variables for photoresistor
+int light;
 
 // master variables
 bool masterState = true; // True if I'm the master, False if not
@@ -42,16 +50,13 @@ int swarmState[SWARMSIZE]; // The slave/master state for all swarms, 0 for slave
 long swarmTimeStamp[SWARMSIZE];   // Stores the last time of packet received from the swarms. -1: init, 1: myself, 0: too old (>SWARMTOOOLD)
 
 IPAddress serverAddress = IPAddress(0, 0, 0, 0); // default no IP Address (Will send log to server)
-IPAddress broadcastAddress = IPAddress(192, 168, 0, 255); // 192.168.1.255 broadcast to all devices within the same subnet (192.168.1.x)
+IPAddress broadcastAddress = IPAddress(192, 168, 0, 255);
 
 int swarmAddresses[SWARMSIZE];  // Swarm addresses
 
-// LED 1 variables
-bool LED1_STATUS = false; // BrightnessLedBlink current status
-int LED1_blink_interval = 1000;
-int LED1_prev_time;
+int dutyCycle = 255;
 
-const int PACKET_SIZE = 14; // Light Update Packet
+const int PACKET_SIZE = 8; // Light Update Packet
 const int BUFFERSIZE = 1024;
 
 byte packetBuffer[BUFFERSIZE]; // Buffer to hold incoming and outgoing packets
@@ -64,11 +69,15 @@ IPAddress localIP;
 void setup() {
   Serial.begin(9600);
 
-  pinMode(0, OUTPUT); // GPIO0 as OUTPUT (LED)
-  pinMode(ONBOARD_LED1, OUTPUT); // LED 1 as OUTPUT
-  digitalWrite(ONBOARD_LED1, HIGH); 
   pinMode(MASTER_LED, OUTPUT); // MASTER_LED as OUTPUT
-  digitalWrite(MASTER_LED, LOW); // Turn on LED to show that I'm a master
+  digitalWrite(MASTER_LED, HIGH); // Turn on LED to show that I'm a master
+
+  FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, NUM_LEDS);
+  for (int i = 0; i < NUM_LEDS; i++) {
+    leds[i] = CRGB::Green;
+  }
+  FastLED.setBrightness(2);
+  FastLED.show();
 
   // everybody starts at 0 and changes from there
   mySwarmID = 0;
@@ -78,14 +87,13 @@ void setup() {
   Serial.println(mySwarmID);
 
   Serial.print("Connecting to ");
-  Serial.println(WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PWD);
- 
   // initialize Swarm Address - we start out as swarmID of 0
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
+  digitalWrite(MASTER_LED, LOW); // Turn on LED to show that I'm a master
   Serial.println("");
 
   Serial.println("WiFi connected, IP address: ");
@@ -93,8 +101,6 @@ void setup() {
 
 
   udp.begin(localPort);
-  Serial.print("Establishing UDP at port: ");
-  Serial.println(udp.localPort());
 
   // initialize light sensor and arrays
   for (int i = 0; i < SWARMSIZE; i++) {
@@ -113,27 +119,39 @@ void setup() {
 }
 
 void loop() {
-  int light = analogRead(PHOTORES_PIN);
+  light = analogRead(PHOTORES_PIN);
+  Serial.println(light);
+  int level = light / (1024/NUM_LEDS); // Calculate level of brightness
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    if (i < level) {
+      leds[i] = CRGB::Green;  // Light up LEDs up to the calculated level
+    } else {
+      leds[i] = CRGB::Black;  // Turn off LEDs beyond the calculated level
+    }
+  }
+  FastLED.setBrightness(2);
+  FastLED.show();
+
   swarmLights[mySwarmID] = light;
-  // Serial.print("Sensor Data: "); Serial.println(light);
+  
   sendLogToServer();
-  // Change LED1 blink interval
-  LED1_blink_interval = (1.0 - (float)light/1023.0) * 1000;
-  // Serial.print("LED: "); Serial.println(LED1_blink_interval);
+
   if (isNetworkSilent()) {
     swarmLights[mySwarmID] = light;
     sendLightUpdatePacket(broadcastAddress);
     lastReceiveTime = millis();
   }
-  blinkLED1();
+  
   getUDPPacket();
-  delay(20);
+  delay(50);
 }
 
 void getUDPPacket() {
   int packetSize = udp.parsePacket();
   if (packetSize) {
-    // receive incoming UDP packets
+    Serial.println("Get UDP");
+    //receive incoming UDP packets
     int len = udp.read(packetBuffer, PACKET_SIZE);
     if (len > 0) {
       lastReceiveTime = millis();
@@ -173,14 +191,13 @@ void getUDPPacket() {
         Serial.println(serverAddress);
         Serial.println("Reset Swarm:  I just BECAME Master (and everybody else!)");
         digitalWrite(0, LOW);
-        delay(3000);
       }
     }
   }
+  delay(1);
 }
 
 bool isNetworkSilent() {
-  // Serial.println(millis() - lastReceiveTime);
   return (millis() - lastReceiveTime) > NETWORKSILENT;
 }
 
@@ -206,16 +223,6 @@ void sendLightUpdatePacket(IPAddress & address) {
   udp.beginPacketMulticast(address,  localPort, WiFi.localIP());
   udp.write(packetBuffer, PACKET_SIZE);
   udp.endPacket();
-}
-
-void blinkLED1() {
-  long cur_time = millis();
-  if (cur_time - LED1_prev_time >= LED1_blink_interval/2) {
-    LED1_STATUS = !LED1_STATUS;
-    if (LED1_STATUS) digitalWrite(ONBOARD_LED1, LOW);
-    else digitalWrite(ONBOARD_LED1, HIGH);
-    LED1_prev_time = cur_time;
-  }
 }
 
 // Update swamrs life status, check if I'm the master and turn on/off MASTER_LED
@@ -249,6 +256,7 @@ void checkAndSetIfMaster() {
     Serial.println("I BECOME A SLAVE");
     digitalWrite(MASTER_LED, HIGH);
   }
+  delay(10);
 }
 
 // Find swarmIndex from incoming ID in UDP packet
@@ -280,55 +288,26 @@ int setAndReturnMySwarmIndex(int incomingID) {
   return oldSwarmID;
 }
 
-
-// send log packet to Server if master and server address defined
-void sendLogToServer() {
-  // build the string
-  char myBuildString[1000];
-  myBuildString[0] = '\0';
-  // Serial.print("Sever:"); Serial.println(serverAddress);
-  if (masterState == true) { // I am the master
+void sendLogToServer()
+{
+  if (masterState == true)
+  {
     if ((serverAddress[0] == 0) && (serverAddress[1] == 0)) return; // Server address undefined
     else {
-      // now send the packet as a string with the following format:
-      // swarmID, MasterSlave, SoftwareVersion, clearColor, Status | ....next Swarm ID
-      // 0,1,15,3883, PR | 1,0,14,399, PR | ....
-      char swarmString[20];
-      swarmString[0] = '\0';
+      // set all bytes in the buffer to 0
+      memset(packetBuffer, 0, BUFFERSIZE);
 
-      for (int i = 0; i < SWARMSIZE; i++) {
-        char stateString[5];
-        stateString[0] = '\0';
-        if (swarmTimeStamp[i] == 0) strcat(stateString, "TO"); // Too old
-        else if (swarmTimeStamp[i] == -1) strcat(stateString, "NP"); // Not initiated
-        else if (swarmTimeStamp[i] == 1) strcat(stateString, "PR"); // Swarm alive (Myself)
-        else strcat(stateString, "PR"); // Swarm alive
-
-        sprintf(swarmString, " %i,%i,%i,%i,%s,%i ", i, swarmState[i], swarmVersion[i], swarmLights[i], stateString, swarmAddresses[i]);
-        strcat(myBuildString, swarmString);
-        if (i < SWARMSIZE - 1) strcat(myBuildString, "|");
-      }
+      packetBuffer[0] = 0xF0;   // StartByte
+      packetBuffer[1] = LOG_TO_SERVER_PACKET;     // Packet Type
+      packetBuffer[2] = localIP[3];     // Sending Swarm Number
+      packetBuffer[3] = setAndReturnMySwarmIndex(localIP[3]);  // 0 = slave, 1 = master
+      packetBuffer[4] = VERSIONNUMBER;  // Software Version
+      packetBuffer[5] = (light & 0xFF00) >> 8; // photoresistor value High Byte
+      packetBuffer[6] = (light & 0x00FF); // photoresistor value Low Byte
+      packetBuffer[7] = 0x0F;  //End Byte
+      udp.beginPacket(serverAddress,  localPort);
+      udp.write(packetBuffer, PACKET_SIZE);
+      udp.endPacket();
     }
-    // set all bytes in the buffer to 0
-    memset(packetBuffer, 0, BUFFERSIZE);
-    // Initialize values needed to form Light Packet
-    // (see URL above for details on the packets)
-    packetBuffer[0] = 0xF0;   // StartByte
-    packetBuffer[1] = LOG_TO_SERVER_PACKET;     // Packet Type
-    packetBuffer[2] = localIP[3];     // Sending Swarm Number
-    packetBuffer[3] = strlen(myBuildString); // length of string in bytes
-    packetBuffer[4] = VERSIONNUMBER;  // Software Version
-    int i = 0;
-    for (i = 0; i < strlen(myBuildString); i++) packetBuffer[i + 5] = myBuildString[i];// first string byte
-
-    packetBuffer[i + 5] = 0x0F; //End Byte
-    int packetLength;
-    packetLength = i + 5 + 1;
-
-    udp.beginPacket(serverAddress,  localPort);
-    udp.write(packetBuffer, packetLength);
-    udp.endPacket();
-
   }
 }
-
